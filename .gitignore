@@ -1,0 +1,38 @@
+# Flutter
+.dart_tool/
+.packages
+build/
+*.iml
+.idea/
+.vscode/
+
+# Android
+*.apk
+*.aab
+*.ap_
+*.dex
+local.properties
+.gradle/
+
+# iOS / macOS
+*.ipa
+*.dSYM.zip
+*.dSYM
+Pods/
+.symlinks/
+DerivedData/
+*.xcworkspace
+xcuserdata/
+
+# Linux
+build/
+*.so
+
+# Native build artifacts
+*.o
+*.obj
+*.dylib
+
+# OS
+.DS_Store
+Thumbs.db
