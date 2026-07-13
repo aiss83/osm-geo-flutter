@@ -1,0 +1,7 @@
+feat: add Android target to example + NDK ICU linking
+
+- example/android/: full Flutter Android project structure
+  (settings.gradle, build.gradle, app/build.gradle, AndroidManifest,
+   MainActivity, gradle wrapper, local.properties)
+- android/CMakeLists.txt: link against NDK libicu.so stub,
+  headers from homebrew ICU (platform-independent)

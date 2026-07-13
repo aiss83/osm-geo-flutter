@@ -48,53 +48,96 @@ typedef OsmGeoFreeResultsNative = Void Function(
 typedef OsmGeoFreeResultsDart = void Function(
     Pointer<OsmGeoResult> results, int count);
 
-/* ── Dynamic library loading ───────────────────────────────────────── */
+/* ── Lazy library loading with fallback chain ──────────────────────── */
+
+DynamicLibrary? _cachedLib;
+String? _lastError;
 
 DynamicLibrary _loadLibrary() {
-  if (Platform.isAndroid) {
-    return DynamicLibrary.open('libosm_geo_search.so');
+  if (_cachedLib != null) return _cachedLib!;
+
+  const macosPaths = [
+    // 1. Static symbols (SPM-linked).
+    null,
+    // 2. Bundled dylib in app Frameworks/.
+    '@executable_path/../Frameworks/libosm_geo_search.dylib',
+    // 3. Relative to cwd (dev mode).
+    'Frameworks/libosm_geo_search.dylib',
+    // 4. Bare name (DYLD_LIBRARY_PATH).
+    'libosm_geo_search.dylib',
+  ];
+
+  final paths = Platform.isMacOS
+      ? macosPaths
+      : [if (Platform.isAndroid || Platform.isLinux) 'libosm_geo_search.so'];
+
+  final buf = StringBuffer();
+  buf.writeln('[osm_geo_search] Loading (${Platform.operatingSystem})');
+  buf.writeln('[osm_geo_search] Exe: ${Platform.resolvedExecutable}');
+
+  final errors = <String>[];
+  var attempt = 0;
+  for (final path in paths) {
+    attempt++;
+    final label = path ?? 'process';
+    try {
+      final lib = path == null ? DynamicLibrary.process() : DynamicLibrary.open(path);
+      // Verify that the library actually has our symbols.
+      lib.lookupFunction<OsmGeoOpenNative, OsmGeoOpenDart>('osm_geo_open');
+      _cachedLib = lib;
+      buf.writeln('[osm_geo_search]   #$attempt $label … OK');
+      // ignore: avoid_print
+      print(buf.toString());
+      return lib;
+    } catch (e) {
+      buf.writeln('[osm_geo_search]   #$attempt $label … FAIL: $e');
+      errors.add('  $label: $e');
+    }
   }
-  if (Platform.isLinux) {
-    return DynamicLibrary.open('libosm_geo_search.so');
-  }
-  if (Platform.isMacOS) {
-    // Static library linked into the binary — symbols available
-    // through the process handle.
-    return DynamicLibrary.process();
-  }
-  throw UnsupportedError('Unsupported platform: ${Platform.operatingSystem}');
+
+  buf.writeln('[osm_geo_search] All paths exhausted.');
+  _lastError = buf.toString();
+  // ignore: avoid_print
+  print(_lastError!);
+  throw UnsupportedError(_lastError!);
 }
 
-final DynamicLibrary _lib = _loadLibrary();
+/// Returns the last library loading error, if any.
+String? get lastLoadError => _lastError;
 
-/* ── Bound functions ───────────────────────────────────────────────── */
+/* ── Bound functions (lazy, via getters) ───────────────────────────── */
 
-final Pointer<OsmGeoDB> Function(Pointer<Utf8> path) osmGeoOpen = _lib
-    .lookupFunction<OsmGeoOpenNative, OsmGeoOpenDart>('osm_geo_open');
+Pointer<OsmGeoDB> Function(Pointer<Utf8> path) get osmGeoOpen =>
+    _loadLibrary()
+        .lookupFunction<OsmGeoOpenNative, OsmGeoOpenDart>('osm_geo_open');
 
-final void Function(Pointer<OsmGeoDB> db) osmGeoClose = _lib
-    .lookupFunction<OsmGeoCloseNative, OsmGeoCloseDart>('osm_geo_close');
+void Function(Pointer<OsmGeoDB> db) get osmGeoClose =>
+    _loadLibrary()
+        .lookupFunction<OsmGeoCloseNative, OsmGeoCloseDart>('osm_geo_close');
 
-final Pointer<Utf8> Function() osmGeoError = _lib
-    .lookupFunction<OsmGeoErrorNative, OsmGeoErrorDart>('osm_geo_error');
+Pointer<Utf8> Function() get osmGeoError =>
+    _loadLibrary()
+        .lookupFunction<OsmGeoErrorNative, OsmGeoErrorDart>('osm_geo_error');
 
-final Pointer<OsmGeoResult> Function(
+Pointer<OsmGeoResult> Function(
         Pointer<OsmGeoDB> db, Pointer<Utf8> query, int maxResults,
-        Pointer<Int32> outCount) osmGeoSearchByName = _lib
-    .lookupFunction<OsmGeoSearchNative, OsmGeoSearchDart>(
+        Pointer<Int32> outCount) get osmGeoSearchByName =>
+    _loadLibrary().lookupFunction<OsmGeoSearchNative, OsmGeoSearchDart>(
         'osm_geo_search_by_name');
 
-final Pointer<OsmGeoResult> Function(
+Pointer<OsmGeoResult> Function(
         Pointer<OsmGeoDB> db, Pointer<Utf8> query, int maxResults,
-        Pointer<Int32> outCount) osmGeoSearchByAddress = _lib
-    .lookupFunction<OsmGeoSearchNative, OsmGeoSearchDart>(
+        Pointer<Int32> outCount) get osmGeoSearchByAddress =>
+    _loadLibrary().lookupFunction<OsmGeoSearchNative, OsmGeoSearchDart>(
         'osm_geo_search_by_address');
 
-final Pointer<OsmGeoResult> Function(
+Pointer<OsmGeoResult> Function(
         Pointer<OsmGeoDB> db, Pointer<Utf8> query, int maxResults,
-        Pointer<Int32> outCount) osmGeoSearch = _lib
-    .lookupFunction<OsmGeoSearchNative, OsmGeoSearchDart>('osm_geo_search');
+        Pointer<Int32> outCount) get osmGeoSearch =>
+    _loadLibrary().lookupFunction<OsmGeoSearchNative, OsmGeoSearchDart>(
+        'osm_geo_search');
 
-final void Function(Pointer<OsmGeoResult> results, int count) osmGeoFreeResults =
-    _lib.lookupFunction<OsmGeoFreeResultsNative, OsmGeoFreeResultsDart>(
-        'osm_geo_free_results');
+void Function(Pointer<OsmGeoResult> results, int count)
+    get osmGeoFreeResults =>
+        _loadLibrary().lookupFunction<OsmGeoFreeResultsNative,
+            OsmGeoFreeResultsDart>('osm_geo_free_results');

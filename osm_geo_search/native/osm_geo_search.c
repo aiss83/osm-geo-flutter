@@ -17,19 +17,63 @@
 #define MAGIC         0x474D534F  /* "OSMG" little-endian */
 #define VERSION       1
 
+/* ── Packed structs matching the binary format ─────────────────────── */
+#pragma pack(push, 1)
+
+typedef struct {
+    uint8_t  magic[4];
+    uint16_t version;
+    uint32_t record_count;
+    uint32_t addr_count;
+    uint32_t named_count;
+    uint64_t build_timestamp;
+    uint8_t  region[46];
+    uint32_t string_pool_offset;
+    uint32_t named_index_offset;
+    uint32_t addr_index_offset;
+    uint32_t records_offset;
+} Header;
+
+typedef struct {
+    uint16_t name_idx;
+    uint16_t translit_idx;
+    uint8_t  category;
+    uint32_t record_idx;
+} NamedIndexEntry;
+
+typedef struct {
+    uint16_t city_idx;
+    uint16_t street_idx;
+    uint16_t housenumber_idx;
+    uint32_t record_idx;
+} AddrIndexEntry;
+
+typedef struct {
+    uint8_t  type;
+    float    lat;
+    float    lon;
+} RecordBase;                    /* 9 bytes: type + lat + lon */
+
+typedef struct {
+    uint16_t city_idx;
+    uint16_t street_idx;
+    uint16_t housenumber_idx;
+} RecordAddrFields;              /* 6 bytes */
+
+typedef struct {
+    uint16_t name_idx;
+    uint16_t translit_idx;
+    uint8_t  category;
+} RecordNamedFields;             /* 5 bytes */
+
+#pragma pack(pop)
+
 /* ── Entry sizes (bytes) ──────────────────────────────────────────── */
 
-#define NAMED_ENTRY_SIZE  9    /* name_idx:2 translit_idx:2 cat:1 record_idx:4 */
-#define ADDR_ENTRY_SIZE   10   /* city_idx:2 street_idx:2 housenumber_idx:2 record_idx:4 */
-#define ADDR_RECORD_SIZE  9   /* type:1 lat:4 lon:4 + city:2 street:2 house:2 = 15? */
-#define NAMED_RECORD_SIZE  9   /* type:1 lat:4 lon:4 + name:2 translit:2 cat:1 = 14? */
-
-/* Record sizes from the spec (type byte already counted):
- *   Address record: 1B type + 4B lat + 4B lon + 2B city + 2B street + 2B house = 15B
- *   Named record:   1B type + 4B lat + 4B lon + 2B name + 2B translit + 1B cat = 14B
- */
-#define ADDR_REC_SIZE   15
-#define NAMED_REC_SIZE  14
+#define NAMED_ENTRY_SIZE  sizeof(NamedIndexEntry)   /* 9 */
+#define ADDR_ENTRY_SIZE   sizeof(AddrIndexEntry)    /* 10 */
+#define ADDR_REC_SIZE     (sizeof(RecordBase) + sizeof(RecordAddrFields))   /* 15 */
+#define NAMED_REC_SIZE    (sizeof(RecordBase) + sizeof(RecordNamedFields))  /* 14 */
 
 /* ── Database struct ──────────────────────────────────────────────── */
 
@@ -73,7 +117,7 @@ const char *osm_geo_error(void) {
     return g_error;
 }
 
-/* ── Little-endian readers ────────────────────────────────────────── */
+/* ── Little-endian reader (used for string pool u16 lengths) ───────── */
 
 static inline uint16_t read_u16(const uint8_t *p) {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -82,17 +126,6 @@ static inline uint16_t read_u16(const uint8_t *p) {
 static inline uint32_t read_u32(const uint8_t *p) {
     return (uint32_t)p[0]       | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-static inline int64_t read_i64(const uint8_t *p) {
-    return (int64_t)read_u32(p) | ((int64_t)read_u32(p + 4) << 32);
-}
-
-static inline float read_f32(const uint8_t *p) {
-    uint32_t u = read_u32(p);
-    float f;
-    memcpy(&f, &u, sizeof(f));
-    return f;
 }
 
 /* ── String pool ──────────────────────────────────────────────────── */
@@ -200,16 +233,20 @@ static int sp_is_prefix(const OsmGeoDB *db, uint32_t idx, const char *query) {
 static void named_entry_read(const OsmGeoDB *db, uint32_t entry_idx,
                               uint16_t *name_idx, uint16_t *translit_idx,
                               uint8_t *category, uint32_t *record_idx) {
-    const uint8_t *p = db->map + db->named_index_off + 4 + entry_idx * NAMED_ENTRY_SIZE;
-    *name_idx     = read_u16(p);
-    *translit_idx = read_u16(p + 2);
-    *category     = p[4];
-    *record_idx   = read_u32(p + 5);
+    NamedIndexEntry e;
+    memcpy(&e, db->map + db->named_index_off + 4 + entry_idx * NAMED_ENTRY_SIZE,
+           sizeof(e));
+    *name_idx     = e.name_idx;
+    *translit_idx = e.translit_idx;
+    *category     = e.category;
+    *record_idx   = e.record_idx;
 }
 
 static uint16_t named_name_idx(const OsmGeoDB *db, uint32_t entry_idx) {
-    const uint8_t *p = db->map + db->named_index_off + 4 + entry_idx * NAMED_ENTRY_SIZE;
-    return read_u16(p);
+    NamedIndexEntry e;
+    memcpy(&e, db->map + db->named_index_off + 4 + entry_idx * NAMED_ENTRY_SIZE,
+           sizeof(e));
+    return e.name_idx;
 }
 
 /* ── Address Index access ─────────────────────────────────────────── */
@@ -217,37 +254,43 @@ static uint16_t named_name_idx(const OsmGeoDB *db, uint32_t entry_idx) {
 static void addr_entry_read(const OsmGeoDB *db, uint32_t entry_idx,
                              uint16_t *city_idx, uint16_t *street_idx,
                              uint16_t *house_idx, uint32_t *record_idx) {
-    const uint8_t *p = db->map + db->addr_index_off + entry_idx * ADDR_ENTRY_SIZE;
-    *city_idx   = read_u16(p);
-    *street_idx = read_u16(p + 2);
-    *house_idx  = read_u16(p + 4);
-    *record_idx = read_u32(p + 6);
+    AddrIndexEntry e;
+    memcpy(&e, db->map + db->addr_index_off + 4 + entry_idx * ADDR_ENTRY_SIZE,
+           sizeof(e));
+    *city_idx   = e.city_idx;
+    *street_idx = e.street_idx;
+    *house_idx  = e.housenumber_idx;
+    *record_idx = e.record_idx;
 }
 
 /* ── Record Block access ──────────────────────────────────────────── */
 
-/* Read a record by its logical index (0-based) using the offset table. */
 static int record_read(const OsmGeoDB *db, uint32_t record_idx,
                          uint8_t *type, float *lat, float *lon,
                          uint16_t *a, uint16_t *b, uint16_t *c, uint8_t *cat) {
     if (!db->record_offsets || record_idx >= db->record_count) return -1;
-    uint32_t off = db->record_offsets[record_idx];
-    const uint8_t *p = db->map + off;
+    const uint8_t *p = db->map + db->record_offsets[record_idx];
 
-    *type = p[0];
-    *lat  = read_f32(p + 1);
-    *lon  = read_f32(p + 5);
+    RecordBase base;
+    memcpy(&base, p, sizeof(base));
+    *type = base.type;
+    *lat  = base.lat;
+    *lon  = base.lon;
 
-    if (*type == 0) {  /* Address */
-        *a = read_u16(p + 9);   /* city_idx */
-        *b = read_u16(p + 11);  /* street_idx */
-        *c = read_u16(p + 13);  /* housenumber_idx */
+    if (base.type == 0) {
+        RecordAddrFields af;
+        memcpy(&af, p + sizeof(RecordBase), sizeof(af));
+        *a   = af.city_idx;
+        *b   = af.street_idx;
+        *c   = af.housenumber_idx;
         *cat = 0;
-    } else {             /* Named */
-        *a = read_u16(p + 9);   /* name_idx */
-        *b = read_u16(p + 11);  /* translit_idx */
-        *cat = p[13];
-        *c = 0;
+    } else {
+        RecordNamedFields nf;
+        memcpy(&nf, p + sizeof(RecordBase), sizeof(nf));
+        *a   = nf.name_idx;
+        *b   = nf.translit_idx;
+        *cat = nf.category;
+        *c   = 0;
     }
     return 0;
 }
@@ -282,18 +325,19 @@ OsmGeoDB *osm_geo_open(const char *path) {
         return NULL;
     }
 
-    /* Validate header */
-    uint32_t magic = read_u32(map);
-    if (magic != MAGIC) {
-        set_error("Bad magic: expected 0x%08X, got 0x%08X", MAGIC, magic);
+    /* Validate and parse header */
+    Header hdr;
+    memcpy(&hdr, map, sizeof(hdr));
+    if (memcmp(hdr.magic, "OSMG", 4) != 0) {
+        uint32_t m;
+        memcpy(&m, hdr.magic, 4);
+        set_error("Bad magic: expected 0x%08X, got 0x%08X", MAGIC, m);
         munmap(map, sz);
         close(fd);
         return NULL;
     }
-
-    uint16_t version = read_u16(map + 4);
-    if (version != VERSION) {
-        set_error("Unsupported version: %d (expected %d)", version, VERSION);
+    if (hdr.version != VERSION) {
+        set_error("Unsupported version: %d (expected %d)", hdr.version, VERSION);
         munmap(map, sz);
         close(fd);
         return NULL;
@@ -311,17 +355,17 @@ OsmGeoDB *osm_geo_open(const char *path) {
     db->map      = map;
     db->map_size = sz;
 
-    db->record_count    = read_u32(map + 6);
-    db->addr_count      = read_u32(map + 10);
-    db->named_count     = read_u32(map + 14);
-    db->build_timestamp = read_i64(map + 18);
-    memcpy(db->region, map + 26, 46);
+    db->record_count    = hdr.record_count;
+    db->addr_count      = hdr.addr_count;
+    db->named_count     = hdr.named_count;
+    db->build_timestamp = (int64_t)hdr.build_timestamp;
+    memcpy(db->region, hdr.region, 46);
     db->region[46] = '\0';
 
-    db->string_pool_off = read_u32(map + 72);
-    db->named_index_off = read_u32(map + 76);
-    db->addr_index_off  = read_u32(map + 80);
-    db->records_off     = read_u32(map + 84);
+    db->string_pool_off = hdr.string_pool_offset;
+    db->named_index_off = hdr.named_index_offset;
+    db->addr_index_off  = hdr.addr_index_offset;
+    db->records_off     = hdr.records_offset;
 
     /* ── Metadata validation ──────────────────────────────────────── */
 
@@ -580,24 +624,18 @@ OsmGeoResult *osm_geo_search_by_address(const OsmGeoDB *db,
     char city[256] = {0}, street[256] = {0}, house[256] = {0};
     int components = parse_addr_query(query, city, street, house, sizeof(city));
 
-    /* Binary search for first match on city prefix */
+    /* Binary search on city_idx (full address string starts with city) */
     uint32_t lo = 0, hi = db->addr_count;
-
-    /* Phase 1: find range matching city prefix */
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2;
         uint16_t city_idx, street_idx, house_idx;
         uint32_t rec_off;
         addr_entry_read(db, mid, &city_idx, &street_idx, &house_idx, &rec_off);
         int cmp = sp_cmp(db, city_idx, city);
-        if (cmp <= 0) {
-            hi = mid;
-        } else {
-            lo = mid + 1;
-        }
+        if (cmp <= 0) { hi = mid; } else { lo = mid + 1; }
     }
 
-    /* Walk back to catch earlier case-insensitive city matches */
+    /* Walk back for case-insensitive matches */
     while (lo > 0) {
         uint16_t pc_idx, ps_idx, ph_idx;
         uint32_t p_off;
@@ -606,43 +644,34 @@ OsmGeoResult *osm_geo_search_by_address(const OsmGeoDB *db,
         lo--;
     }
 
-    /* First pass: count matching entries */
+    /* Count matching entries */
     uint32_t count = 0;
     uint32_t limit = (max_results > 0) ? (uint32_t)max_results : UINT32_MAX;
     for (uint32_t idx = lo; idx < db->addr_count && count < limit; idx++) {
         uint16_t c_idx, s_idx, h_idx;
         uint32_t rec_off;
         addr_entry_read(db, idx, &c_idx, &s_idx, &h_idx, &rec_off);
-
         if (!sp_is_prefix(db, c_idx, city)) break;
-
         if (components >= 2 && street[0]) {
             if (!sp_is_prefix(db, s_idx, street)) continue;
         }
         if (components >= 3 && house[0]) {
             if (!sp_is_prefix(db, h_idx, house)) continue;
         }
-
         count++;
     }
-
     if (count == 0) return NULL;
 
     OsmGeoResult *results = calloc(count, sizeof(OsmGeoResult));
-    if (!results) {
-        set_error("Out of memory");
-        return NULL;
-    }
+    if (!results) { set_error("Out of memory"); return NULL; }
 
-    /* Second pass: fill results */
+    /* Fill results */
     uint32_t ri = 0;
     for (uint32_t idx = lo; idx < db->addr_count && ri < count; idx++) {
         uint16_t c_idx, s_idx, h_idx;
         uint32_t rec_off;
         addr_entry_read(db, idx, &c_idx, &s_idx, &h_idx, &rec_off);
-
         if (!sp_is_prefix(db, c_idx, city)) break;
-
         if (components >= 2 && street[0]) {
             if (!sp_is_prefix(db, s_idx, street)) continue;
         }
@@ -657,26 +686,34 @@ OsmGeoResult *osm_geo_search_by_address(const OsmGeoDB *db,
         if (record_read(db, rec_off, &rtype, &lat, &lon, &a, &b, &c2, &cat) != 0)
             continue;
 
-        results[ri].lat      = lat;
-        results[ri].lon      = lon;
-        results[ri].type     = 0;
+        results[ri].lat = lat;
+        results[ri].lon = lon;
+        results[ri].type = 0;
         results[ri].category = 0;
 
-        /* Build address string: "city, street, house" */
-        char *cs = sp_get(db, c_idx);
-        char *ss = sp_get(db, s_idx);
-        char *hs = sp_get(db, h_idx);
-        char addr_buf[512];
-        snprintf(addr_buf, sizeof(addr_buf), "%s, %s, %s",
-                 cs ? cs : "", ss ? ss : "", hs ? hs : "");
-        results[ri].name = strdup(addr_buf);
-        free(cs);
-        free(ss);
-        free(hs);
-
+        /* Build full address: "city" | "city, street" | "city, street, house" */
+        {
+            char *cs = sp_get(db, c_idx);
+            char *ss = sp_get(db, s_idx);
+            char *hs = sp_get(db, h_idx);
+            int csn = (cs && cs[0]) ? 1 : 0;
+            int ssn = (ss && ss[0]) ? 1 : 0;
+            int hsn = (hs && hs[0]) ? 1 : 0;
+            size_t total = (csn ? strlen(cs) : 0) +
+                           (ssn ? strlen(ss) + 2 : 0) +
+                           (hsn ? strlen(hs) + 2 : 0) + 1;
+            results[ri].name = malloc(total);
+            if (results[ri].name) {
+                results[ri].name[0] = '\0';
+                if (csn) strcat(results[ri].name, cs);
+                if (ssn) { strcat(results[ri].name, ", "); strcat(results[ri].name, ss); }
+                if (hsn) { strcat(results[ri].name, ", "); strcat(results[ri].name, hs); }
+            }
+            free(cs); free(ss); free(hs);
+            if (!results[ri].name) results[ri].name = strdup("");
+        }
         ri++;
     }
-
     *out_count = (int)ri;
     return results;
 }

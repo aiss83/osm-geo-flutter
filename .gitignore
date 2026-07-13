@@ -33,6 +33,14 @@ build/
 *.obj
 *.dylib
 
+# Python
+__pycache__/
+
+# Data files
+*.bin
+*.db
+*.db.zst
+
 # OS
 .DS_Store
 Thumbs.db
