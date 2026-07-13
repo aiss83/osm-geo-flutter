@@ -12,11 +12,9 @@ target_include_directories(osm_geo_search PRIVATE
   ../native
 )
 
-# ICU — headers from homebrew, library from Android NDK
-target_include_directories(osm_geo_search PRIVATE
-  /opt/homebrew/opt/icu4c@78/include
-)
-
-# NDK provides a unified libicu.so stub (API 31+).
+# ICU — Android NDK provides headers (v76.1) + libicu.so stub (API 31+).
+# The NDK toolchain file adds sysroot/usr/include to the include path
+# automatically, so the NDK's ucasemap.h (with _76 suffixed symbols)
+# is used instead of homebrew's.
 find_library(icu_lib icu)
 target_link_libraries(osm_geo_search ${icu_lib} log)

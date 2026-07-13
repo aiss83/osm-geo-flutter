@@ -41,7 +41,7 @@ class _FilePickerScreenState extends State<FilePickerScreen> {
     Future<void> _pickFile() async {
     setState(() => _error = null);
 
-    final result = await FilePicker.platform.pickFiles(
+    final result = await FilePicker.pickFiles(
       type: FileType.any,
       allowMultiple: false,
     );

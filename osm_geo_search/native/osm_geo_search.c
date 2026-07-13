@@ -5,11 +5,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unicode/ucasemap.h>
-#include <unicode/utypes.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+/* ── ICU header: platform-specific ────────────────────────────────── */
+
+#if defined(__ANDROID__)
+#include <unicode/ustring.h>
+#include <unicode/utypes.h>
+#else
+#include <unicode/ucasemap.h>
+#include <unicode/utypes.h>
+#endif
 
 /* ── Binary format constants ──────────────────────────────────────── */
 
@@ -98,8 +106,10 @@ struct OsmGeoDB {
     /* Record offset lookup (record_idx → byte offset) */
     uint32_t *record_offsets;
 
+#if !defined(__ANDROID__)
     /* ICU case-folding map for UTF-8 case-insensitive comparison */
     UCaseMap *case_map;
+#endif
 };
 
 /* ── Error state ──────────────────────────────────────────────────── */
@@ -161,16 +171,80 @@ static char *sp_get(const OsmGeoDB *db, uint32_t idx) {
     return buf;
 }
 
+/* ── Platform-specific case-insensitive helpers ───────────────────── */
+
+#if defined(__ANDROID__)
+
+/* Fold a UTF-8 string to lowercase UChar buffer. Returns UChar length. */
+static int32_t utf8_fold(const char *src, int32_t src_len,
+                          UChar *dst, int32_t dst_cap, UErrorCode *ec) {
+    UChar tmp[512];
+    u_strFromUTF8(tmp, (int32_t)sizeof(tmp)/sizeof(UChar), NULL, src, src_len, ec);
+    if (U_FAILURE(*ec)) return 0;
+    return u_strToLower(dst, dst_cap, tmp, -1, NULL, ec);
+}
+
 /* ICU-based case-insensitive comparison of a query against a pool string.
  * Pool string at index idx has known byte length.  Returns <0, 0, >0. */
 static int sp_cmp(const OsmGeoDB *db, uint32_t idx, const char *query) {
     const uint8_t *p  = db->map + db->string_pool_off + SP_HEADER_SIZE;
     const uint8_t *end = db->map + db->map_size;
-
     for (uint32_t i = 0; i < idx; i++) {
         if (p + 2 > end) return 1;
-        uint16_t len = read_u16(p);
-        p += 2 + len;
+        p += 2 + read_u16(p);
+        if (p > end) return 1;
+    }
+    if (p + 2 > end) return 1;
+    uint16_t plen = read_u16(p);
+    p += 2;
+    if (p + plen > end) return 1;
+
+    UErrorCode ec = U_ZERO_ERROR;
+    UChar qbuf[256], pbuf[256];
+    int32_t qlen = utf8_fold(query, -1, qbuf, 256, &ec);
+    ec = U_ZERO_ERROR;
+    int32_t flen = utf8_fold((const char *)p, plen, pbuf, 256, &ec);
+    if (U_FAILURE(ec)) return 1;
+
+    int n = qlen < flen ? qlen : flen;
+    int diff = u_memcmp(qbuf, pbuf, (int32_t)n);
+    if (diff != 0) return diff;
+    if (qlen <= flen) return 0;
+    return 1;
+}
+
+static int sp_is_prefix(const OsmGeoDB *db, uint32_t idx, const char *query) {
+    const uint8_t *p  = db->map + db->string_pool_off + SP_HEADER_SIZE;
+    const uint8_t *end = db->map + db->map_size;
+    for (uint32_t i = 0; i < idx; i++) {
+        if (p + 2 > end) return 0;
+        p += 2 + read_u16(p);
+        if (p > end) return 0;
+    }
+    if (p + 2 > end) return 0;
+    uint16_t plen = read_u16(p);
+    p += 2;
+    if (p + plen > end) return 0;
+
+    UErrorCode ec = U_ZERO_ERROR;
+    UChar qbuf[256], pbuf[256];
+    int32_t qlen = utf8_fold(query, -1, qbuf, 256, &ec);
+    ec = U_ZERO_ERROR;
+    utf8_fold((const char *)p, plen, pbuf, 256, &ec);
+    if (U_FAILURE(ec)) return 0;
+
+    return (qlen <= (int32_t)plen && u_memcmp(qbuf, pbuf, (int32_t)qlen) == 0);
+}
+
+#else /* !__ANDROID__ — macOS / desktop */
+
+/* ICU-based case-insensitive comparison via ucasemap. */
+static int sp_cmp(const OsmGeoDB *db, uint32_t idx, const char *query) {
+    const uint8_t *p  = db->map + db->string_pool_off + SP_HEADER_SIZE;
+    const uint8_t *end = db->map + db->map_size;
+    for (uint32_t i = 0; i < idx; i++) {
+        if (p + 2 > end) return 1;
+        p += 2 + read_u16(p);
         if (p > end) return 1;
     }
     if (p + 2 > end) return 1;
@@ -180,7 +254,6 @@ static int sp_cmp(const OsmGeoDB *db, uint32_t idx, const char *query) {
 
     if (!db->case_map) return 0;
 
-    /* Fold both strings to UTF-8 lowercase via ICU */
     char    qbuf[512], pbuf[512];
     UErrorCode ec = U_ZERO_ERROR;
     int32_t qlen = ucasemap_utf8FoldCase(db->case_map, qbuf, (int32_t)sizeof(qbuf),
@@ -193,20 +266,16 @@ static int sp_cmp(const OsmGeoDB *db, uint32_t idx, const char *query) {
     int n = qlen < flen ? qlen : flen;
     int diff = strncmp(qbuf, pbuf, (size_t)n);
     if (diff != 0) return diff;
-    /* Query exhausted → prefix match */
     if (qlen <= flen) return 0;
     return 1;
 }
 
-/* ICU-based case-insensitive prefix check. */
 static int sp_is_prefix(const OsmGeoDB *db, uint32_t idx, const char *query) {
     const uint8_t *p  = db->map + db->string_pool_off + SP_HEADER_SIZE;
     const uint8_t *end = db->map + db->map_size;
-
     for (uint32_t i = 0; i < idx; i++) {
         if (p + 2 > end) return 0;
-        uint16_t len = read_u16(p);
-        p += 2 + len;
+        p += 2 + read_u16(p);
         if (p > end) return 0;
     }
     if (p + 2 > end) return 0;
@@ -227,6 +296,8 @@ static int sp_is_prefix(const OsmGeoDB *db, uint32_t idx, const char *query) {
 
     return (qlen <= (int32_t)plen && strncmp(qbuf, pbuf, (size_t)qlen) == 0);
 }
+
+#endif /* __ANDROID__ */
 
 /* ── Named Index access ───────────────────────────────────────────── */
 
@@ -449,19 +520,23 @@ OsmGeoDB *osm_geo_open(const char *path) {
 
     /* Create ICU case-folding map for UTF-8 case-insensitive comparison */
     {
+#if !defined(__ANDROID__)
         UErrorCode ec = U_ZERO_ERROR;
         db->case_map = ucasemap_open(NULL, 0, &ec);
         if (U_FAILURE(ec)) {
             set_error("ICU: ucasemap_open failed");
             goto fail;
         }
+#endif
     }
 
     return db;
 
-fail:
+ fail:
     if (db) {
+#if !defined(__ANDROID__)
         if (db->case_map) ucasemap_close(db->case_map);
+#endif
         free(db->record_offsets);
     }
     free(db);
@@ -472,7 +547,9 @@ fail:
 
 void osm_geo_close(OsmGeoDB *db) {
     if (!db) return;
+#if !defined(__ANDROID__)
     if (db->case_map) ucasemap_close(db->case_map);
+#endif
     free(db->record_offsets);
     if (db->map && db->map != MAP_FAILED) {
         munmap(db->map, db->map_size);

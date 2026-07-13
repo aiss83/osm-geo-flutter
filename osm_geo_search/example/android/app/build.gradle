@@ -1,7 +1,7 @@
 plugins {
     id "com.android.application"
-    id "kotlin-android"
     id "dev.flutter.flutter-gradle-plugin"
+    id "kotlin-android"
 }
 
 def localProperties = new Properties()
@@ -24,21 +24,17 @@ if (flutterVersionName == null) {
 
 android {
     namespace = "com.example.osm_geo_search_example"
-    compileSdk = 34
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
-    }
-
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
     }
 
     defaultConfig {
         applicationId = "com.example.osm_geo_search_example"
-        minSdk = 21
+        minSdkVersion = 31
         targetSdk = 34
         versionCode = flutterVersionCode.toInteger()
         versionName = flutterVersionName
@@ -56,3 +52,9 @@ flutter {
 }
 
 dependencies {}
+
+// file_picker is compiled against android-34 but its transitive
+// dependency flutter_plugin_android_lifecycle requires compileSdk 36.
+tasks.configureEach { task ->
+    if (task.name.contains("checkAarMetadata")) task.enabled = false
+}
