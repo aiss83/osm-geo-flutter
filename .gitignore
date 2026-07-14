@@ -32,6 +32,7 @@ build/
 *.o
 *.obj
 *.dylib
+.cxx/
 
 # Python
 __pycache__/
