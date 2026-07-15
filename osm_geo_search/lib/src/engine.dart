@@ -10,6 +10,9 @@ class GeoResult {
   final double lon;
   final String name;
   final String? translit;
+  final String? city;
+  final String? street;
+  final String? house;
   final int category;
   final ResultType type;
 
@@ -18,12 +21,21 @@ class GeoResult {
     required this.lon,
     required this.name,
     this.translit,
+    this.city,
+    this.street,
+    this.house,
     this.category = 0,
     required this.type,
   });
 
   @override
-  String toString() => 'GeoResult($type, "$name", $lat, $lon)';
+  String toString() {
+    final addr = [city, street, house].where((e) => e != null && e.isNotEmpty);
+    if (addr.isNotEmpty) {
+      return 'GeoResult($type, "$name" [${addr.join(', ')}], $lat, $lon)';
+    }
+    return 'GeoResult($type, "$name", $lat, $lon)';
+  }
 }
 
 enum ResultType { address, named }
@@ -60,6 +72,53 @@ class OsmGeoDatabase {
       }
       return OsmGeoDatabase._(handle);
     } finally {
+      calloc.free(pathPtr);
+    }
+  }
+
+  /// Open with progress reporting during index construction.
+  ///
+  /// **Note:** This runs synchronously on the calling thread. The
+  /// [onProgress] callback fires during the call, but the UI cannot
+  /// update until the call returns (the main isolate is blocked).
+  /// For a responsive UI, wrap this call in [Isolate.run] in your
+  /// application code.
+  ///
+  /// [onProgress] receives (done, total, phase):
+  ///   - phase "records": building record offset table
+  ///   - phase "streets": building street lookup index (slowest)
+  ///   - phase "sort":   sorting the street index
+  ///
+  /// Example:
+  /// ```dart
+  /// // Fast path (blocks UI briefly — fine for small databases):
+  /// final db = OsmGeoDatabase.openWithProgress(
+  ///   path,
+  ///   onProgress: (done, total, phase) => print('$phase $done/$total'),
+  /// );
+  /// ```
+  factory OsmGeoDatabase.openWithProgress(
+    String path, {
+    required void Function(int done, int total, String phase) onProgress,
+  }) {
+    final pathPtr = path.toNativeUtf8();
+    final callback = NativeCallable<
+        bindings.OsmGeoProgressNative>.listener((done, total, phasePtr) {
+      onProgress(done, total, phasePtr.toDartString());
+    });
+    try {
+      final handle = bindings.osmGeoOpenWithProgress(
+        pathPtr,
+        callback.nativeFunction,
+      );
+      if (handle == nullptr) {
+        final errPtr = bindings.osmGeoError();
+        throw OsmGeoException(
+            'Failed to open "$path": ${errPtr.toDartString()}');
+      }
+      return OsmGeoDatabase._(handle);
+    } finally {
+      callback.close();
       calloc.free(pathPtr);
     }
   }
@@ -113,6 +172,46 @@ class OsmGeoDatabase {
     }
   }
 
+  /// Intelligent full-text search with automatic mode detection.
+  ///
+  /// Single-token queries (no comma/space separators) search as a prefix
+  /// simultaneously across POI names, cities, and streets.
+  /// Results are ranked: named POI first, then streets, then cities.
+  ///
+  /// Multi-token queries (separated by comma or space) are treated as
+  /// structured address: "city street" or "city, street" or
+  /// "city, street, house". Also supports "city, POI-name" pattern.
+  ///
+  /// Minimum query length is 3 characters. Results include structured
+  /// address fields ([GeoResult.city], [GeoResult.street],
+  /// [GeoResult.house]) when available.
+  ///
+  /// Example:
+  /// ```dart
+  /// // Free-form: finds streets and POIs starting with "Твер"
+  /// db.searchFulltext('Твер');
+  /// // => "Калининград, Тверская улица", "Тверской бульвар", ...
+  ///
+  /// // Structured: city + street
+  /// db.searchFulltext('Калининград, Тверская');
+  ///
+  /// // Structured: city + POI
+  /// db.searchFulltext('Калининград, кафе');
+  /// ```
+  List<GeoResult> searchFulltext(String query, {int maxResults = 50}) {
+    _checkClosed();
+    final qPtr = query.toNativeUtf8();
+    final outCount = calloc<Int32>();
+    try {
+      final resultsPtr =
+          bindings.osmGeoSearchFulltext(_handle, qPtr, maxResults, outCount);
+      return _collectResults(resultsPtr, outCount.value);
+    } finally {
+      calloc.free(qPtr);
+      calloc.free(outCount);
+    }
+  }
+
   List<GeoResult> _collectResults(
       Pointer<bindings.OsmGeoResult> resultsPtr, int count) {
     if (resultsPtr == nullptr || count <= 0) return [];
@@ -126,6 +225,9 @@ class OsmGeoDatabase {
         name: entry.name.toDartString(),
         translit:
             entry.translit == nullptr ? null : entry.translit.toDartString(),
+        city: entry.city == nullptr ? null : entry.city.toDartString(),
+        street: entry.street == nullptr ? null : entry.street.toDartString(),
+        house: entry.house == nullptr ? null : entry.house.toDartString(),
         category: entry.category,
         type: entry.type == 1 ? ResultType.named : ResultType.address,
       ));
@@ -138,6 +240,11 @@ class OsmGeoDatabase {
   void _checkClosed() {
     if (_closed) throw StateError('Database is closed');
   }
+
+  /// Whether the background street index has finished building.
+  /// [searchFulltext] works immediately, but street results are
+  /// limited until this returns true.
+  bool get isIndexReady => bindings.osmGeoIsIndexReady(_handle) != 0;
 
   /// Close the database and release all resources.
   void close() {

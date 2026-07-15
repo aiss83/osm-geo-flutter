@@ -131,6 +131,85 @@ int main(void) {
     osm_geo_free_results(r1, c1);
     osm_geo_free_results(r2, c2);
 
+    /* ── Fulltext search tests ────────────────────────────────── */
+
+    printf("\n=== Fulltext Search Tests ===\n");
+
+    printf("\nTest F1: Free-form — 2 chars (too short)\n");
+    r1 = osm_geo_search_fulltext(db, "Тв", 5, &c1);
+    check_eq(c1, 0, "2-char query returns 0");
+    osm_geo_free_results(r1, c1);
+
+    printf("\nTest F2: Free-form — street prefix\n");
+    r1 = osm_geo_search_fulltext(db, "Твер", 10, &c1);
+    printf("  'Твер' → %d results\n", c1);
+    check_eq(c1 > 0, 1, "free-form street prefix finds matches");
+    for (int i = 0; i < c1 && i < 5; i++) {
+        printf("    [%d] name=\"%s\" city=%s street=%s house=%s type=%d\n",
+               i, r1[i].name,
+               r1[i].city ? r1[i].city : "NULL",
+               r1[i].street ? r1[i].street : "NULL",
+               r1[i].house ? r1[i].house : "NULL",
+               r1[i].type);
+    }
+    osm_geo_free_results(r1, c1);
+
+    printf("\nTest F3: Free-form — POI prefix\n");
+    r1 = osm_geo_search_fulltext(db, "кафе", 5, &c1);
+    printf("  'кафе' → %d results\n", c1);
+    check_eq(c1 > 0, 1, "free-form POI prefix finds matches");
+    for (int i = 0; i < c1 && i < 5; i++)
+        printf("    [%d] name=\"%s\" type=%d\n", i, r1[i].name, r1[i].type);
+    osm_geo_free_results(r1, c1);
+
+    printf("\nTest F4: Free-form — case insensitive\n");
+    r1 = osm_geo_search_fulltext(db, "твер", 10, &c1);
+    r2 = osm_geo_search_fulltext(db, "ТВЕР", 10, &c2);
+    check_eq(c1, c2, "fulltext твер vs ТВЕР count");
+    osm_geo_free_results(r1, c1);
+    osm_geo_free_results(r2, c2);
+
+    printf("\nTest F5: Structured — city + street (comma)\n");
+    r1 = osm_geo_search_fulltext(db, "Калининград, Твер", 10, &c1);
+    printf("  'Калининград, Твер' → %d results\n", c1);
+    check_eq(c1 > 0, 1, "structured comma finds matches");
+    for (int i = 0; i < c1 && i < 5; i++) {
+        printf("    [%d] name=\"%s\" city=%s street=%s house=%s\n",
+               i, r1[i].name,
+               r1[i].city ? r1[i].city : "NULL",
+               r1[i].street ? r1[i].street : "NULL",
+               r1[i].house ? r1[i].house : "NULL");
+    }
+    osm_geo_free_results(r1, c1);
+
+    printf("\nTest F6: Structured — city + street (space)\n");
+    r1 = osm_geo_search_fulltext(db, "Калининград Тверская", 10, &c1);
+    printf("  'Калининград Тверская' → %d results\n", c1);
+    check_eq(c1 > 0, 1, "structured space finds matches");
+    osm_geo_free_results(r1, c1);
+
+    printf("\nTest F7: Structured — city + street + house\n");
+    r1 = osm_geo_search_fulltext(db, "Калининград, Тверская, 1", 5, &c1);
+    printf("  'Калининград, Тверская, 1' → %d results\n", c1);
+    check_eq(c1 > 0, 1, "city+street+house finds matches");
+    for (int i = 0; i < c1 && i < 3; i++)
+        printf("    [%d] name=\"%s\" house=%s\n",
+               i, r1[i].name, r1[i].house ? r1[i].house : "NULL");
+    osm_geo_free_results(r1, c1);
+
+    printf("\nTest F8: Structured — city + POI object\n");
+    r1 = osm_geo_search_fulltext(db, "Калининград, кафе", 10, &c1);
+    printf("  'Калининград, кафе' → %d results\n", c1);
+    for (int i = 0; i < c1 && i < 5; i++)
+        printf("    [%d] name=\"%s\" type=%d\n", i, r1[i].name, r1[i].type);
+    check_eq(c1 > 0, 1, "city+object finds matches");
+    osm_geo_free_results(r1, c1);
+
+    printf("\nTest F9: Free-form fallback — unknown city\n");
+    r1 = osm_geo_search_fulltext(db, "НесуществующийГород Тверская", 10, &c1);
+    printf("  unknown city → %d results (should fall back)\n", c1);
+    osm_geo_free_results(r1, c1);
+
     osm_geo_close(db);
     if (fail) { printf("\n*** FAILED ***\n"); return 1; }
     printf("\n=== ALL TESTS PASSED ===\n");

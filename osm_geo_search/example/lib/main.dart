@@ -54,9 +54,10 @@ class _FilePickerScreenState extends State<FilePickerScreen> {
       return;
     }
 
-    // Try to open the database to validate the file
+    // Open the DB — returns instantly, index builds in background thread.
+    OsmGeoDatabase? db;
     try {
-      OsmGeoDatabase.open(path).close();
+      db = OsmGeoDatabase.open(path);
     } on OsmGeoException catch (e) {
       setState(() => _error = 'Ошибка открытия файла: ${e.message}');
       return;
@@ -65,10 +66,10 @@ class _FilePickerScreenState extends State<FilePickerScreen> {
       return;
     }
 
-    if (!mounted) return;
+    if (!mounted) { db.close(); return; }
     Navigator.pushReplacement(
       context,
-      MaterialPageRoute(builder: (_) => SearchScreen(filePath: path)),
+      MaterialPageRoute(builder: (_) => SearchScreen(database: db!)),
     );
   }
 
@@ -157,9 +158,9 @@ class _FilePickerScreenState extends State<FilePickerScreen> {
 // ── Screen 2: Address search ─────────────────────────────────────────
 
 class SearchScreen extends StatefulWidget {
-  final String filePath;
+  final OsmGeoDatabase database;
 
-  const SearchScreen({super.key, required this.filePath});
+  const SearchScreen({super.key, required this.database});
 
   @override
   State<SearchScreen> createState() => _SearchScreenState();
@@ -168,48 +169,45 @@ class SearchScreen extends StatefulWidget {
 class _SearchScreenState extends State<SearchScreen> {
   final _queryController = TextEditingController();
   final _focusNode = FocusNode();
-  OsmGeoDatabase? _db;
+  late final OsmGeoDatabase _db;
   List<GeoResult> _suggestions = [];
   GeoResult? _selected;
   Timer? _debounce;
+  Timer? _indexPoll;
   bool _showSuggestions = false;
+  bool _isSearching = false;
+  bool _indexReady = false;
 
   @override
   void initState() {
     super.initState();
-    _initDb();
-  }
-
-  void _initDb() {
-    try {
-      _db = OsmGeoDatabase.open(widget.filePath);
-      // Auto-focus the search field
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _focusNode.requestFocus();
-      });
-    } on OsmGeoException catch (e) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Ошибка: ${e.message}'),
-            backgroundColor: Theme.of(context).colorScheme.error,
-          ),
-        );
+    _db = widget.database;
+    _indexReady = _db.isIndexReady;
+    if (!_indexReady) {
+      _indexPoll = Timer.periodic(const Duration(milliseconds: 150), (_) {
+        if (_db.isIndexReady) {
+          _indexPoll?.cancel();
+          setState(() => _indexReady = true);
+        }
       });
     }
+    _focusNode.requestFocus();
   }
 
   void _onQueryChanged(String query) {
     _debounce?.cancel();
     _selected = null;
 
-    if (query.length < 2) {
+    if (query.length < 3) {
       setState(() {
         _suggestions = [];
         _showSuggestions = false;
+        _isSearching = false;
       });
       return;
     }
+
+    setState(() => _isSearching = true);
 
     _debounce = Timer(const Duration(milliseconds: 250), () {
       _search(query);
@@ -217,18 +215,18 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   void _search(String query) {
-    if (_db == null) return;
-
     try {
-      final results = _db!.searchByAddress(query, maxResults: 10);
+      final results = _db.searchFulltext(query, maxResults: 10);
       setState(() {
         _suggestions = results;
         _showSuggestions = true;
+        _isSearching = false;
       });
     } on OsmGeoException {
       setState(() {
         _suggestions = [];
         _showSuggestions = false;
+        _isSearching = false;
       });
     }
   }
@@ -244,7 +242,8 @@ class _SearchScreenState extends State<SearchScreen> {
   @override
   void dispose() {
     _debounce?.cancel();
-    _db?.close();
+    _indexPoll?.cancel();
+    _db.close();
     _queryController.dispose();
     _focusNode.dispose();
     super.dispose();
@@ -253,15 +252,14 @@ class _SearchScreenState extends State<SearchScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final fileName = widget.filePath.split('/').last;
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(fileName),
+        title: const Text('Поиск'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
           onPressed: () {
-            _db?.close();
+            _db.close();
             Navigator.pushReplacement(
               context,
               MaterialPageRoute(builder: (_) => const FilePickerScreen()),
@@ -271,6 +269,30 @@ class _SearchScreenState extends State<SearchScreen> {
       ),
       body: Column(
         children: [
+          // Index building indicator
+          if (!_indexReady)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              color: theme.colorScheme.tertiaryContainer,
+              child: Row(
+                children: [
+                  const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    'Индексация улиц…',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onTertiaryContainer,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
           // Search bar
           Padding(
             padding: const EdgeInsets.all(16),
@@ -278,29 +300,38 @@ class _SearchScreenState extends State<SearchScreen> {
               controller: _queryController,
               focusNode: _focusNode,
               onChanged: _onQueryChanged,
-              decoration: InputDecoration(
-                hintText: 'Введите адрес (город, улица, дом)',
-                prefixIcon: const Icon(Icons.search),
-                suffixIcon: _queryController.text.isNotEmpty
-                    ? IconButton(
-                        icon: const Icon(Icons.clear),
-                        onPressed: () {
-                          _queryController.clear();
-                          setState(() {
-                            _suggestions = [];
-                            _showSuggestions = false;
-                            _selected = null;
-                          });
-                        },
-                      )
-                    : null,
-                border: const OutlineInputBorder(),
-                filled: true,
-                fillColor: theme.colorScheme.surfaceContainerHighest
-                    .withValues(alpha: 0.3),
+                  decoration: InputDecoration(
+                    hintText: 'Название, улица или адрес (город, улица, дом)',
+                    prefixIcon: const Icon(Icons.search),
+                    suffixIcon: _isSearching
+                        ? const Padding(
+                            padding: EdgeInsets.all(12),
+                            child: SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          )
+                        : _queryController.text.isNotEmpty
+                            ? IconButton(
+                                icon: const Icon(Icons.clear),
+                                onPressed: () {
+                                  _queryController.clear();
+                                  setState(() {
+                                    _suggestions = [];
+                                    _showSuggestions = false;
+                                    _selected = null;
+                                  });
+                                },
+                              )
+                            : null,
+                    border: const OutlineInputBorder(),
+                    filled: true,
+                    fillColor: theme.colorScheme.surfaceContainerHighest
+                        .withValues(alpha: 0.3),
+                  ),
+                ),
               ),
-            ),
-          ),
 
           // Suggestions dropdown
           if (_showSuggestions && _suggestions.isNotEmpty)
@@ -335,7 +366,7 @@ class _SearchScreenState extends State<SearchScreen> {
           // "Not found" state
           if (_showSuggestions &&
               _suggestions.isEmpty &&
-              _queryController.text.length >= 2)
+              _queryController.text.length >= 3)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Card(
@@ -358,13 +389,14 @@ class _SearchScreenState extends State<SearchScreen> {
           if (_selected != null)
             Expanded(
               child: Center(
-                child: Card(
-                  margin: const EdgeInsets.all(32),
-                  child: Padding(
-                    padding: const EdgeInsets.all(48),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
+                child: SingleChildScrollView(
+                  child: Card(
+                    margin: const EdgeInsets.all(32),
+                    child: Padding(
+                      padding: const EdgeInsets.all(48),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
                         Icon(Icons.location_on,
                             size: 64, color: theme.colorScheme.primary),
                         const SizedBox(height: 16),
@@ -389,29 +421,23 @@ class _SearchScreenState extends State<SearchScreen> {
                     ),
                   ),
                 ),
+                ),
               ),
             )
           else
             const Expanded(
               child: Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.search_off, size: 48, color: Colors.grey),
-                    SizedBox(height: 16),
-                    Text(
-                      'Начните вводить адрес для поиска',
-                      style: TextStyle(color: Colors.grey, fontSize: 16),
-                    ),
-                  ],
+                child: Text(
+                  'Введите запрос для поиска',
+                  style: TextStyle(color: Colors.grey, fontSize: 14),
                 ),
               ),
             ),
-        ],
-      ),
-    );
+          ],
+        ),
+      );
+    }
   }
-}
 
 class _CoordinateRow extends StatelessWidget {
   final String label;

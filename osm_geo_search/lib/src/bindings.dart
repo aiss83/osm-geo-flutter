@@ -18,6 +18,12 @@ final class OsmGeoResult extends Struct {
 
   external Pointer<Utf8> translit;
 
+  external Pointer<Utf8> city;
+
+  external Pointer<Utf8> street;
+
+  external Pointer<Utf8> house;
+
   @Uint8()
   external int category;
 
@@ -29,6 +35,15 @@ final class OsmGeoResult extends Struct {
 
 typedef OsmGeoOpenNative = Pointer<OsmGeoDB> Function(Pointer<Utf8> path);
 typedef OsmGeoOpenDart = Pointer<OsmGeoDB> Function(Pointer<Utf8> path);
+
+typedef OsmGeoProgressNative = Void Function(
+    Int32 done, Int32 total, Pointer<Utf8> phase);
+typedef OsmGeoProgressDart = void Function(int done, int total, Pointer<Utf8> phase);
+
+typedef OsmGeoOpenWithProgressNative = Pointer<OsmGeoDB> Function(
+    Pointer<Utf8> path, Pointer<NativeFunction<OsmGeoProgressNative>> progress);
+typedef OsmGeoOpenWithProgressDart = Pointer<OsmGeoDB> Function(
+    Pointer<Utf8> path, Pointer<NativeFunction<OsmGeoProgressNative>> progress);
 
 typedef OsmGeoCloseNative = Void Function(Pointer<OsmGeoDB> db);
 typedef OsmGeoCloseDart = void Function(Pointer<OsmGeoDB> db);
@@ -57,14 +72,14 @@ DynamicLibrary _loadLibrary() {
   if (_cachedLib != null) return _cachedLib!;
 
   const macosPaths = [
-    // 1. Static symbols (SPM-linked).
-    null,
-    // 2. Bundled dylib in app Frameworks/.
+    // 1. Bundled dylib in app Frameworks/ (prefer fresh copy).
     '@executable_path/../Frameworks/libosm_geo_search.dylib',
-    // 3. Relative to cwd (dev mode).
+    // 2. Relative to cwd (dev mode).
     'Frameworks/libosm_geo_search.dylib',
-    // 4. Bare name (DYLD_LIBRARY_PATH).
+    // 3. Bare name (DYLD_LIBRARY_PATH).
     'libosm_geo_search.dylib',
+    // 4. Static symbols (SPM-linked) — fallback, may be stale.
+    null,
   ];
 
   final paths = Platform.isMacOS
@@ -111,6 +126,18 @@ Pointer<OsmGeoDB> Function(Pointer<Utf8> path) get osmGeoOpen =>
     _loadLibrary()
         .lookupFunction<OsmGeoOpenNative, OsmGeoOpenDart>('osm_geo_open');
 
+Pointer<OsmGeoDB> Function(
+        Pointer<Utf8> path,
+        Pointer<NativeFunction<OsmGeoProgressNative>> progress)
+    get osmGeoOpenWithProgress =>
+        _loadLibrary().lookupFunction<OsmGeoOpenWithProgressNative,
+            OsmGeoOpenWithProgressDart>('osm_geo_open_with_progress');
+
+Pointer<Utf8> Function() get osmGeoVersion =>
+    _loadLibrary()
+        .lookupFunction<Pointer<Utf8> Function(), Pointer<Utf8> Function()>(
+            'osm_geo_version');
+
 void Function(Pointer<OsmGeoDB> db) get osmGeoClose =>
     _loadLibrary()
         .lookupFunction<OsmGeoCloseNative, OsmGeoCloseDart>('osm_geo_close');
@@ -136,6 +163,17 @@ Pointer<OsmGeoResult> Function(
         Pointer<Int32> outCount) get osmGeoSearch =>
     _loadLibrary().lookupFunction<OsmGeoSearchNative, OsmGeoSearchDart>(
         'osm_geo_search');
+
+Pointer<OsmGeoResult> Function(
+        Pointer<OsmGeoDB> db, Pointer<Utf8> query, int maxResults,
+        Pointer<Int32> outCount) get osmGeoSearchFulltext =>
+    _loadLibrary().lookupFunction<OsmGeoSearchNative, OsmGeoSearchDart>(
+        'osm_geo_search_fulltext');
+
+int Function(Pointer<OsmGeoDB> db) get osmGeoIsIndexReady =>
+    _loadLibrary()
+        .lookupFunction<Int32 Function(Pointer<OsmGeoDB>), int Function(Pointer<OsmGeoDB>)>(
+            'osm_geo_is_index_ready');
 
 void Function(Pointer<OsmGeoResult> results, int count)
     get osmGeoFreeResults =>

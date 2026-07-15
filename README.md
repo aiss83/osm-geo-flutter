@@ -13,7 +13,10 @@ on sorted indices. Supports prefix matching for incremental search / autocomplet
 - **Binary search** on sorted indices — O(log N) lookup
 - **Prefix matching** for incremental search / autocomplete
 - **Case-insensitive** search — handles ASCII, Cyrillic, and mixed case via ICU
-- **Combined search** across POI names and addresses
+- **Intelligent full-text search** — automatic mode detection (free-form / structured)
+- **Structured results** — city, street, house fields for address matches
+- **Relevance ranking** — exact city matches first, then streets, then POI names
+- **Background index building** — non-blocking open, street index built in background thread
 - **MacOS** · **Android** · **Linux** support
 
 ## Installation
@@ -43,6 +46,27 @@ for (final r in addrs) {
   print('${r.name}: (${r.lat}, ${r.lon})');
 }
 
+// Intelligent full-text search (auto-detects free-form vs structured)
+final results = db.searchFulltext('Калининград, Тверская');
+for (final r in results) {
+  print('${r.name}: ${r.city}, ${r.street}, ${r.house}');
+}
+
+// Free-form: finds streets and POIs starting with "Твер" everywhere
+final free = db.searchFulltext('Твер');
+
+// Structured: city + street (comma or space separated)
+final addr = db.searchFulltext('Калининград, Московский проспект');
+
+// City + POI object
+final cityPoi = db.searchFulltext('Калининград, кафе');
+
+// Street + house without city (comma required)
+final streetHouse = db.searchFulltext('Московский проспект, 1');
+
+// Street + house without city (space, 3+ tokens)
+final spaceHouse = db.searchFulltext('Московский проспект 1');
+
 // Combined search (POI names + addresses)
 final all = db.search('кафе', maxResults: 20);
 
@@ -55,10 +79,13 @@ db.close();
 
 | Method | Description |
 |--------|-------------|
-| `OsmGeoDatabase.open(String path)` | Open a `.bin` database file. Throws `OsmGeoException` on failure. |
+| `OsmGeoDatabase.open(String path)` | Open a `.bin` database file. Returns immediately; street index builds in background. Throws `OsmGeoException` on failure. |
+| `openWithProgress(String path, {required onProgress})` | Open with progress callback `(done, total, phase)`. |
 | `searchByName(String query, {int maxResults = 50})` | Prefix search by POI name. |
 | `searchByAddress(String query, {int maxResults = 50})` | Prefix search by address. Query format: `"city"` or `"city, street"` or `"city, street, house"`. |
-| `search(String query, {int maxResults = 50})` | Combined search across POI names and addresses. Named results come first. |
+| `search(String query, {int maxResults = 50})` | Combined search across POI names and addresses. |
+| `searchFulltext(String query, {int maxResults = 50})` | Intelligent full-text search. Auto-detects free-form vs structured input. Min 3 chars. |
+| `isIndexReady` | `true` when the background street index has finished building. |
 | `close()` | Close the database and release all resources. |
 
 ### `GeoResult`
@@ -69,6 +96,9 @@ db.close();
 | `lon` | `double` | Longitude |
 | `name` | `String` | POI name or full address string |
 | `translit` | `String?` | Transliterated name (may be null) |
+| `city` | `String?` | City / settlement name (null for POI) |
+| `street` | `String?` | Street name (null for POI) |
+| `house` | `String?` | House number (null for POI) |
 | `category` | `int` | Category tag for Named results |
 | `type` | `ResultType` | `ResultType.named` or `ResultType.address` |
 
